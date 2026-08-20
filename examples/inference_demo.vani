@@ -1,0 +1,87 @@
+// End-to-end example: load a pre-built TensorRT engine, discover its
+// input/output bindings, run inference, and destroy everything
+// cleanly. Build with:
+//
+//   vanic build inference_demo.vani --backend=c \
+//     --link-with ../shims/vani_tensorrt_shim.cpp \
+//     -lnvinfer -lcudart -lstdc++ \
+//     -o inference_demo
+//
+// UNVERIFIED ON REAL HARDWARE (and unverified against a real
+// TensorRT SDK at all -- see README.md's "Hardware AND API-version
+// verification status"). This file type-checks; it has not been run,
+// and there is no model.engine file bundled with this example --
+// point `engine_path` at a real one built via `trtexec` if you have
+// TensorRT available.
+//
+// This package deliberately has no hard dependency on vani-cuda (see
+// README.md), so the device-pointer values below are illustrative
+// placeholders (0) rather than real vani-cuda::cuda_malloc calls --
+// in real usage, replace them with device pointers you allocated and
+// populated via vani-cuda (or any other CUDA memory source), one per
+// binding, in binding-index order.
+
+use "../src/lib.vani";
+
+fn main() -> i64 {
+  let engine_path: Str = "model.engine";
+
+  let runtime: i64 = trt_create_runtime();
+  if runtime == 0 {
+    eprint "trt_create_runtime failed";
+    return 1;
+  }
+
+  let engine: i64 = trt_load_engine_from_file(runtime, engine_path);
+  if engine == 0 {
+    eprint "trt_load_engine_from_file failed -- see stderr above for TensorRT's own message";
+    return 1;
+  }
+
+  let nb: i32 = trt_get_nb_bindings(engine);
+  print "engine has", nb, "bindings";
+
+  // Discover each binding's role and size.
+  let bindings: Vec<i64> = vec();
+  let i: i32 = 0;
+  while i < nb {
+    let is_input: i32 = trt_binding_is_input(engine, i);
+    let n_elems: i64 = trt_get_binding_num_elements(engine, i);
+    if is_input == 1 {
+      print "binding", i, "is an INPUT with", n_elems, "elements";
+    } else {
+      print "binding", i, "is an OUTPUT with", n_elems, "elements";
+    }
+    if n_elems < 0 {
+      eprint "dynamic-shape bindings are not yet supported by this package (see TODO.md)";
+      return 1;
+    }
+    // In real usage: allocate n_elems * sizeof(element) bytes of
+    // device memory here (e.g. vani-cuda's cuda_malloc), and for
+    // input bindings, copy your real input data in (cuda_memcpy_h2d_*)
+    // before calling trt_execute below. This example pushes a
+    // placeholder 0 (a null device pointer) instead, since it has no
+    // real CUDA allocator wired in and cannot actually run.
+    push(mut ref bindings, 0);
+    i = i + 1;
+  }
+
+  let context: i64 = trt_create_execution_context(engine);
+  if context == 0 {
+    eprint "trt_create_execution_context failed";
+    return 1;
+  }
+
+  let ok: i32 = trt_execute(context, ref bindings, nb);
+  if ok == 1 {
+    print "inference succeeded -- read output bindings back via cuda_memcpy_d2h_* now";
+  } else {
+    eprint "trt_execute failed -- see stderr above for TensorRT's own message";
+  }
+
+  let _ = trt_destroy_execution_context(context);
+  let _ = trt_destroy_engine(engine);
+  let _ = trt_destroy_runtime(runtime);
+
+  return 0;
+}

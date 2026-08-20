@@ -1,0 +1,54 @@
+// Exercises every binding this package declares, so `vanic check`
+// validates the full FFI surface's syntax and types compile cleanly.
+//
+// IMPORTANT: this file type-checks only. It is NOT run as part of
+// CI and will NOT execute correctly without (a) a machine with an
+// NVIDIA GPU + full TensorRT SDK installed, (b) a real serialized
+// `.engine` file to load, and (c) building with
+// `vanic build --link-with shims/vani_tensorrt_shim.cpp -lnvinfer
+// -lcudart -lstdc++` (see README.md's "Building and testing" section
+// for the exact commands -- none of this repo's automated checks
+// attempt real execution, since no TensorRT installation exists in
+// this development environment at all).
+//
+// Run just the type-check with:
+//   vanic check tests/test_bindings_typecheck.vani
+
+use "../src/lib.vani";
+
+fn main() -> i64 {
+  let runtime: i64 = trt_create_runtime();
+  print "trt_create_runtime handle:", runtime;
+
+  let engine: i64 = trt_load_engine_from_file(runtime, "model.engine");
+  print "trt_load_engine_from_file handle:", engine;
+
+  let nb: i32 = trt_get_nb_bindings(engine);
+  print "trt_get_nb_bindings:", nb;
+
+  let idx: i32 = trt_get_binding_index(engine, "input0");
+  print "trt_get_binding_index:", idx;
+
+  let is_input: i32 = trt_binding_is_input(engine, idx);
+  print "trt_binding_is_input:", is_input;
+
+  let n_elems: i64 = trt_get_binding_num_elements(engine, idx);
+  print "trt_get_binding_num_elements:", n_elems;
+
+  let context: i64 = trt_create_execution_context(engine);
+  print "trt_create_execution_context handle:", context;
+
+  // Illustrative bindings array -- real usage populates this with
+  // cuda_malloc'd device pointers, one per binding, in binding-index
+  // order (see vani-cuda). Zeros here only exercise the signature.
+  let bindings: Vec<i64> = vec(0, 0);
+  let ok: i32 = trt_execute(context, ref bindings, 2);
+  print "trt_execute (1=success, 0=failure):", ok;
+
+  let rc1: i32 = trt_destroy_execution_context(context);
+  let rc2: i32 = trt_destroy_engine(engine);
+  let rc3: i32 = trt_destroy_runtime(runtime);
+  print "destroy rcs:", rc1, rc2, rc3;
+
+  return 0;
+}

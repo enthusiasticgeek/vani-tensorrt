@@ -1,0 +1,76 @@
+name: Deploy API Tutorial to GitHub Pages
+
+# Regenerates the auto-generated API-reference tutorial (see
+# tools/gen_api_tutorial.py's own header comment for what it does and
+# why it's mechanical rather than hand-authored) and publishes it.
+# The generated tutorials/src/{index,api_reference,SUMMARY}.md files
+# are NOT committed to the repo -- they're regenerated fresh on every
+# run from current src/lib.vani + tests/ + examples/, so the published
+# site can never drift stale relative to the code it describes.
+#
+# Triggers:
+#   - Automatic: any push to main that changes the package's public
+#     surface, its tests/examples, or the generator/workflow itself
+#   - Manual:    Actions tab -> "Deploy API Tutorial to GitHub Pages"
+#                -> Run workflow
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "examples/**"
+      - "vani.toml"
+      - "tools/gen_api_tutorial.py"
+      - "tools/tutorial_extras.json"
+      - "tutorials/theme/**"
+      - "tutorials/book.toml"
+      - ".github/workflows/deploy-api-tutorial.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate API reference from source
+        run: python3 tools/gen_api_tutorial.py
+
+      - name: Install mdBook
+        run: |
+          MDBOOK_VERSION=0.4.40
+          curl -sSL \
+            "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar xz -C /usr/local/bin/
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Build tutorial
+        run: mdbook build tutorials/
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: tutorials/book
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

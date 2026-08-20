@@ -1,0 +1,25 @@
+# mdBook configuration for the tensorrt API-reference tutorial.
+# Auto-scaffolded once by tools/gen_api_tutorial.py; edit freely --
+# unlike src/*.md, this file is NOT regenerated on subsequent runs.
+[book]
+title = "tensorrt — API Reference"
+authors = ["vāṇी contributors"]
+description = "Auto-generated function-by-function API reference for the tensorrt vāṇī package."
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/enthusiasticgeek/vani-tensorrt"
+edit-url-template = "https://github.com/enthusiasticgeek/vani-tensorrt/edit/main/tutorials/{path}"
+# "Translate this page" button in the menu bar, for readers not
+# fluent in English -- opens Google Translate's proxy view for the
+# current page in a new tab. No external script/widget embedded.
+additional-js = ["theme/translate-link.js"]
+# LaTeX math rendering via MathJax, for packages whose comments use
+# math notation (e.g. \\(A x = b\\) or \\[ ... \\] blocks).
+mathjax-support = true
+
+[output.html.search]
+enable = true

@@ -1,0 +1,88 @@
+// vani-tensorrt: host-side TensorRT inference bindings via extern "C"
+// FFI. Unlike vani-cuda/vani-rocm's Runtime API bindings (thin type-
+// width translations over an already-flat C API), TensorRT's own API
+// is C++-object-shaped with no C entry points at all -- every
+// function below calls into a hand-written C++ shim
+// (shims/vani_tensorrt_shim.cpp) that manages the actual object
+// lifecycle (IRuntime / ICudaEngine / IExecutionContext) and exposes
+// only opaque i64 handles + free functions across the FFI boundary.
+//
+// READ shims/vani_tensorrt_shim.cpp's header comment before using
+// this package -- it documents a real, TensorRT-specific risk beyond
+// the usual "untested on hardware" caveat every hardware-acceleration
+// package in this ecosystem carries: this binds TensorRT's classic
+// bindings-based Execution API, which TensorRT 10.x deprecated parts
+// of in favor of a newer tensor-name-based API. See also README.md's
+// "Hardware AND API-version verification status" section.
+//
+// SCOPE: inference only, and only for an ALREADY-BUILT serialized
+// engine file (produced offline via `trtexec`, TensorRT's own CLI
+// tool). Building an engine from an ONNX model (the Builder +
+// NetworkDefinition + BuilderConfig + parser pipeline) is
+// deliberately out of scope for v0.1.0 -- see the shim's header
+// comment for why this is a documented scope decision, not an
+// oversight.
+//
+// This package naturally composes with vani-cuda: TensorRT's
+// `bindings` array (trt_execute's argument) is an array of DEVICE
+// pointers -- allocate and populate them with vani-cuda's
+// cuda_malloc/cuda_memcpy_h2d_*, run inference here, read results
+// back with vani-cuda's cuda_memcpy_d2h_*. There is no hard vani.toml
+// dependency on vani-cuda (TensorRT itself already pulls in the CUDA
+// Runtime as a transitive link dependency), but you'll want it in
+// practice for anything beyond toy testing.
+
+// ---- Runtime -----------------------------------------------------------
+
+// Creates the top-level TensorRT runtime. Returns 0 on failure.
+// Unlike vani-cuda/vani-rocm's functions, there is no separate
+// error-string query here -- TensorRT reports errors through an
+// internal logger that this package wires to stderr; check there on
+// any 0/failure return.
+extern "C" fn trt_create_runtime() -> i64;
+extern "C" fn trt_destroy_runtime(runtime: i64) -> i32;
+
+// ---- Engine (a loaded, ready-to-run compiled model) ---------------------
+
+// Loads and deserializes a pre-built `.engine`/`.plan` file (built
+// offline via `trtexec`, TensorRT's own CLI tool -- see README.md).
+// Returns 0 on failure (bad path, or the file isn't a valid engine
+// for this exact TensorRT build + GPU architecture -- engines are
+// NOT portable across TensorRT versions or GPU generations).
+extern "C" fn trt_load_engine_from_file(runtime: i64, path: Str) -> i64;
+extern "C" fn trt_destroy_engine(engine: i64) -> i32;
+
+// Number of bindings (inputs + outputs combined) the engine exposes.
+extern "C" fn trt_get_nb_bindings(engine: i64) -> i32;
+
+// -1 if no binding with this name exists.
+extern "C" fn trt_get_binding_index(engine: i64, name: Str) -> i32;
+
+// 1 if the binding at `index` is an input, 0 if it's an output.
+extern "C" fn trt_binding_is_input(engine: i64, index: i32) -> i32;
+
+// Total element count for the binding at `index` (product of every
+// dimension) -- use this to size the host/device buffers you
+// allocate for it. Returns -1 if the engine uses a dynamic shape for
+// this binding (not yet supported by this v0.1.0 -- see TODO.md).
+extern "C" fn trt_get_binding_num_elements(engine: i64, index: i32) -> i64;
+
+// ---- Execution context (the actual thing you run inference through) ----
+
+extern "C" fn trt_create_execution_context(engine: i64) -> i64;
+extern "C" fn trt_destroy_execution_context(context: i64) -> i32;
+
+// Runs synchronous inference. `bindings` is a Vec of DEVICE pointers
+// (as i64 handles -- one per binding index, in the same order
+// trt_get_binding_index reports), already allocated (e.g. via
+// vani-cuda's cuda_malloc) and, for input bindings, already populated
+// with input data (e.g. via vani-cuda's cuda_memcpy_h2d_*) before
+// this call. After a successful call, read output bindings back with
+// cuda_memcpy_d2h_*.
+//
+// Returns 1 on SUCCESS, 0 on FAILURE -- note this is the OPPOSITE
+// convention from every other function in this package (which return
+// a handle/count where 0 means failure): this mirrors TensorRT's own
+// `executeV2`, which returns a bool rather than a status code. There
+// is no separate error code on failure; check stderr.
+extern "C" fn trt_execute(context: i64, bindings: ref Vec<i64>, n_bindings: i32) -> i32;
