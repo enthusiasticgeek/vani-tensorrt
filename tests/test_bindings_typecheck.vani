@@ -3,8 +3,8 @@
 //
 // IMPORTANT: this file type-checks only. It is NOT run as part of
 // CI and will NOT execute correctly without (a) a machine with an
-// NVIDIA GPU + full TensorRT SDK installed, (b) a real serialized
-// `.engine` file to load, and (c) building with
+// NVIDIA GPU + a current (TensorRT 10+) TensorRT SDK installed, (b) a
+// real serialized `.engine` file to load, and (c) building with
 // `vanic build --link-with shims/vani_tensorrt_shim.cpp -lnvinfer
 // -lcudart -lstdc++` (see README.md's "Building and testing" section
 // for the exact commands -- none of this repo's automated checks
@@ -23,32 +23,41 @@ fn main() -> i64 {
   let engine: i64 = trt_load_engine_from_file(runtime, "model.engine");
   print "trt_load_engine_from_file handle:", engine;
 
-  let nb: i32 = trt_get_nb_bindings(engine);
-  print "trt_get_nb_bindings:", nb;
+  let nb: i32 = trt_get_nb_io_tensors(engine);
+  print "trt_get_nb_io_tensors:", nb;
 
-  let idx: i32 = trt_get_binding_index(engine, "input0");
-  print "trt_get_binding_index:", idx;
+  let name: Str = trt_get_io_tensor_name(engine, 0);
+  print "trt_get_io_tensor_name(0):", name;
 
-  let is_input: i32 = trt_binding_is_input(engine, idx);
-  print "trt_binding_is_input:", is_input;
+  let is_input: i32 = trt_tensor_is_input(engine, name);
+  print "trt_tensor_is_input:", is_input;
 
-  let n_elems: i64 = trt_get_binding_num_elements(engine, idx);
-  print "trt_get_binding_num_elements:", n_elems;
+  let n_elems: i64 = trt_get_tensor_num_elements(engine, name);
+  print "trt_get_tensor_num_elements:", n_elems;
 
   let context: i64 = trt_create_execution_context(engine);
   print "trt_create_execution_context handle:", context;
 
-  // Illustrative bindings array -- real usage populates this with
-  // cuda_malloc'd device pointers, one per binding, in binding-index
-  // order (see vani-cuda). Zeros here only exercise the signature.
-  let bindings: Vec<i64> = vec(0, 0);
-  let ok: i32 = trt_execute(context, ref bindings, 2);
-  print "trt_execute (1=success, 0=failure):", ok;
+  // Illustrative device pointer -- real usage passes a cuda_malloc'd
+  // address here, populated with input data for input tensors.
+  let device_ptr: i64 = 0;
+  let rc_addr: i32 = trt_set_tensor_address(context, name, device_ptr);
+  print "trt_set_tensor_address:", rc_addr;
 
-  let rc1: i32 = trt_destroy_execution_context(context);
-  let rc2: i32 = trt_destroy_engine(engine);
-  let rc3: i32 = trt_destroy_runtime(runtime);
-  print "destroy rcs:", rc1, rc2, rc3;
+  let stream: i64 = trt_create_stream();
+  print "trt_create_stream handle:", stream;
+
+  let ok: i32 = trt_enqueue(context, stream);
+  print "trt_enqueue (1=success, 0=failure):", ok;
+
+  let rc_sync: i32 = trt_stream_synchronize(stream);
+  print "trt_stream_synchronize:", rc_sync;
+
+  let rc1: i32 = trt_destroy_stream(stream);
+  let rc2: i32 = trt_destroy_execution_context(context);
+  let rc3: i32 = trt_destroy_engine(engine);
+  let rc4: i32 = trt_destroy_runtime(runtime);
+  print "destroy rcs:", rc1, rc2, rc3, rc4;
 
   return 0;
 }

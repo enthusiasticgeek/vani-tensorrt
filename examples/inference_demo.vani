@@ -1,6 +1,7 @@
 // End-to-end example: load a pre-built TensorRT engine, discover its
-// input/output bindings, run inference, and destroy everything
-// cleanly. Build with:
+// I/O tensors by name, bind device-pointer addresses, run inference
+// asynchronously, synchronize, and destroy everything cleanly. Build
+// with:
 //
 //   vanic build inference_demo.vani --backend=c \
 //     --link-with ../shims/vani_tensorrt_shim.cpp \
@@ -8,18 +9,18 @@
 //     -o inference_demo
 //
 // UNVERIFIED ON REAL HARDWARE (and unverified against a real
-// TensorRT SDK at all -- see README.md's "Hardware AND API-version
-// verification status"). This file type-checks; it has not been run,
-// and there is no model.engine file bundled with this example --
-// point `engine_path` at a real one built via `trtexec` if you have
-// TensorRT available.
+// TensorRT SDK at all -- see README.md's "Hardware verification
+// status"). This file type-checks; it has not been run, and there is
+// no model.engine file bundled with this example -- point
+// `engine_path` at a real one built via `trtexec` if you have a
+// current (TensorRT 10+) TensorRT install available.
 //
 // This package deliberately has no hard dependency on vani-cuda (see
 // README.md), so the device-pointer values below are illustrative
 // placeholders (0) rather than real vani-cuda::cuda_malloc calls --
 // in real usage, replace them with device pointers you allocated and
 // populated via vani-cuda (or any other CUDA memory source), one per
-// binding, in binding-index order.
+// I/O tensor.
 
 use "../src/lib.vani";
 
@@ -38,33 +39,8 @@ fn main() -> i64 {
     return 1;
   }
 
-  let nb: i32 = trt_get_nb_bindings(engine);
-  print "engine has", nb, "bindings";
-
-  // Discover each binding's role and size.
-  let bindings: Vec<i64> = vec();
-  let i: i32 = 0;
-  while i < nb {
-    let is_input: i32 = trt_binding_is_input(engine, i);
-    let n_elems: i64 = trt_get_binding_num_elements(engine, i);
-    if is_input == 1 {
-      print "binding", i, "is an INPUT with", n_elems, "elements";
-    } else {
-      print "binding", i, "is an OUTPUT with", n_elems, "elements";
-    }
-    if n_elems < 0 {
-      eprint "dynamic-shape bindings are not yet supported by this package (see TODO.md)";
-      return 1;
-    }
-    // In real usage: allocate n_elems * sizeof(element) bytes of
-    // device memory here (e.g. vani-cuda's cuda_malloc), and for
-    // input bindings, copy your real input data in (cuda_memcpy_h2d_*)
-    // before calling trt_execute below. This example pushes a
-    // placeholder 0 (a null device pointer) instead, since it has no
-    // real CUDA allocator wired in and cannot actually run.
-    push(mut ref bindings, 0);
-    i = i + 1;
-  }
+  let nb: i32 = trt_get_nb_io_tensors(engine);
+  print "engine has", nb, "I/O tensors";
 
   let context: i64 = trt_create_execution_context(engine);
   if context == 0 {
@@ -72,13 +48,52 @@ fn main() -> i64 {
     return 1;
   }
 
-  let ok: i32 = trt_execute(context, ref bindings, nb);
-  if ok == 1 {
-    print "inference succeeded -- read output bindings back via cuda_memcpy_d2h_* now";
-  } else {
-    eprint "trt_execute failed -- see stderr above for TensorRT's own message";
+  // Discover each tensor's name, role, and size, then bind a device
+  // pointer for it.
+  let i: i32 = 0;
+  while i < nb {
+    let name: Str = trt_get_io_tensor_name(engine, i);
+    let is_input: i32 = trt_tensor_is_input(engine, name);
+    let n_elems: i64 = trt_get_tensor_num_elements(engine, name);
+    if is_input == 1 {
+      print "tensor", name, "is an INPUT with", n_elems, "elements";
+    } else {
+      print "tensor", name, "is an OUTPUT with", n_elems, "elements";
+    }
+    if n_elems < 0 {
+      eprint "dynamic-shape tensors are not yet supported by this package (see TODO.md)";
+      return 1;
+    }
+    // In real usage: allocate n_elems * sizeof(element) bytes of
+    // device memory here (e.g. vani-cuda's cuda_malloc), and for
+    // input tensors, copy your real input data in (cuda_memcpy_h2d_*)
+    // before running inference. This example uses a placeholder 0
+    // (a null device pointer) instead, since it has no real CUDA
+    // allocator wired in and cannot actually run.
+    let device_ptr: i64 = 0;
+    let rc_addr: i32 = trt_set_tensor_address(context, name, device_ptr);
+    if rc_addr == 0 {
+      eprint "trt_set_tensor_address failed for a tensor";
+      return 1;
+    }
+    i = i + 1;
   }
 
+  let stream: i64 = trt_create_stream();
+  if stream == 0 {
+    eprint "trt_create_stream failed";
+    return 1;
+  }
+
+  let ok: i32 = trt_enqueue(context, stream);
+  if ok == 1 {
+    let _ = trt_stream_synchronize(stream);
+    print "inference succeeded -- read output tensors back via cuda_memcpy_d2h_* now";
+  } else {
+    eprint "trt_enqueue failed -- see stderr above for TensorRT's own message";
+  }
+
+  let _ = trt_destroy_stream(stream);
   let _ = trt_destroy_execution_context(context);
   let _ = trt_destroy_engine(engine);
   let _ = trt_destroy_runtime(runtime);

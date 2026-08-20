@@ -7,30 +7,32 @@
 // lifecycle (IRuntime / ICudaEngine / IExecutionContext) and exposes
 // only opaque i64 handles + free functions across the FFI boundary.
 //
-// READ shims/vani_tensorrt_shim.cpp's header comment before using
-// this package -- it documents a real, TensorRT-specific risk beyond
-// the usual "untested on hardware" caveat every hardware-acceleration
-// package in this ecosystem carries: this binds TensorRT's classic
-// bindings-based Execution API, which TensorRT 10.x deprecated parts
-// of in favor of a newer tensor-name-based API. See also README.md's
-// "Hardware AND API-version verification status" section.
+// TARGETS THE CURRENT (2026-era) TENSOR-NAME-BASED EXECUTION API
+// ONLY, without backward compatibility -- tensors are identified by
+// NAME (`Str`), not by a positional "binding index" the way older
+// TensorRT releases worked. This binds getNbIOTensors/
+// getIOTensorName/getTensorIOMode/getTensorShape/setTensorAddress/
+// enqueueV3 -- the API generation TensorRT 10+ ships. TensorRT
+// releases older than that used a different, now-removed API
+// (getNbBindings/executeV2) and are NOT supported here; there is no
+// compatibility layer. See README.md's "Target generation, no
+// backward compatibility" and "Hardware verification status"
+// sections before using this package.
 //
 // SCOPE: inference only, and only for an ALREADY-BUILT serialized
 // engine file (produced offline via `trtexec`, TensorRT's own CLI
 // tool). Building an engine from an ONNX model (the Builder +
 // NetworkDefinition + BuilderConfig + parser pipeline) is
-// deliberately out of scope for v0.1.0 -- see the shim's header
-// comment for why this is a documented scope decision, not an
-// oversight.
+// deliberately out of scope -- see README.md's "Scope" section.
 //
-// This package naturally composes with vani-cuda: TensorRT's
-// `bindings` array (trt_execute's argument) is an array of DEVICE
-// pointers -- allocate and populate them with vani-cuda's
-// cuda_malloc/cuda_memcpy_h2d_*, run inference here, read results
-// back with vani-cuda's cuda_memcpy_d2h_*. There is no hard vani.toml
-// dependency on vani-cuda (TensorRT itself already pulls in the CUDA
-// Runtime as a transitive link dependency), but you'll want it in
-// practice for anything beyond toy testing.
+// This package naturally composes with vani-cuda: TensorRT tensor
+// addresses are DEVICE pointers -- allocate and populate them with
+// vani-cuda's cuda_malloc/cuda_malloc_async + cuda_memcpy_h2d_*, run
+// inference here, read results back with cuda_memcpy_d2h_*. There is
+// no hard vani.toml dependency on vani-cuda (this package's own
+// trt_create_stream/trt_stream_synchronize/trt_destroy_stream cover
+// the minimum CUDA-stream plumbing enqueueV3 needs stand-alone), but
+// you'll want vani-cuda in practice for anything beyond toy testing.
 
 // ---- Runtime -----------------------------------------------------------
 
@@ -52,37 +54,61 @@ extern "C" fn trt_destroy_runtime(runtime: i64) -> i32;
 extern "C" fn trt_load_engine_from_file(runtime: i64, path: Str) -> i64;
 extern "C" fn trt_destroy_engine(engine: i64) -> i32;
 
-// Number of bindings (inputs + outputs combined) the engine exposes.
-extern "C" fn trt_get_nb_bindings(engine: i64) -> i32;
+// Number of I/O tensors (inputs + outputs combined) the engine
+// exposes.
+extern "C" fn trt_get_nb_io_tensors(engine: i64) -> i32;
 
-// -1 if no binding with this name exists.
-extern "C" fn trt_get_binding_index(engine: i64, name: Str) -> i32;
+// The name of the I/O tensor at position `index` (0..nb_io_tensors).
+// Every other function below identifies a tensor by this NAME, not a
+// position -- discover names by iterating this function first.
+extern "C" fn trt_get_io_tensor_name(engine: i64, index: i32) -> Str;
 
-// 1 if the binding at `index` is an input, 0 if it's an output.
-extern "C" fn trt_binding_is_input(engine: i64, index: i32) -> i32;
+// 1 if the named tensor is an input, 0 if it's an output.
+extern "C" fn trt_tensor_is_input(engine: i64, name: Str) -> i32;
 
-// Total element count for the binding at `index` (product of every
+// Total element count for the named tensor (product of every
 // dimension) -- use this to size the host/device buffers you
 // allocate for it. Returns -1 if the engine uses a dynamic shape for
-// this binding (not yet supported by this v0.1.0 -- see TODO.md).
-extern "C" fn trt_get_binding_num_elements(engine: i64, index: i32) -> i64;
+// this tensor (not yet supported by this v0.1.0 -- see TODO.md).
+extern "C" fn trt_get_tensor_num_elements(engine: i64, name: Str) -> i64;
 
 // ---- Execution context (the actual thing you run inference through) ----
 
 extern "C" fn trt_create_execution_context(engine: i64) -> i64;
 extern "C" fn trt_destroy_execution_context(context: i64) -> i32;
 
-// Runs synchronous inference. `bindings` is a Vec of DEVICE pointers
-// (as i64 handles -- one per binding index, in the same order
-// trt_get_binding_index reports), already allocated (e.g. via
-// vani-cuda's cuda_malloc) and, for input bindings, already populated
-// with input data (e.g. via vani-cuda's cuda_memcpy_h2d_*) before
-// this call. After a successful call, read output bindings back with
-// cuda_memcpy_d2h_*.
+// Binds a device pointer (as an i64 handle -- allocate it with
+// vani-cuda's cuda_malloc/cuda_malloc_async, and for input tensors,
+// populate it with input data before calling trt_enqueue) to the
+// named tensor. Call this once per I/O tensor (both inputs AND
+// outputs need an address set) before every trt_enqueue call whose
+// bindings changed. Returns 1 on success, 0 on failure.
+extern "C" fn trt_set_tensor_address(context: i64, name: Str, device_ptr: i64) -> i32;
+
+// ---- Stream ---------------------------------------------------------
+//
+// trt_enqueue requires an explicit CUDA stream -- there's no
+// implicit "just run synchronously" mode in the modern API. These
+// three are usable stand-alone (no vani-cuda dependency needed for
+// the common case); vani-cuda's own cuda_stream_create/synchronize/
+// destroy work identically if you're already pulling that package in
+// for memory management.
+
+extern "C" fn trt_create_stream() -> i64;
+extern "C" fn trt_destroy_stream(stream: i64) -> i32;
+extern "C" fn trt_stream_synchronize(stream: i64) -> i32;
+
+// ---- Inference -------------------------------------------------------
+
+// Enqueues inference asynchronously on `stream`. Every I/O tensor
+// must already have its address set via trt_set_tensor_address
+// before this call. Returns immediately -- call
+// trt_stream_synchronize before reading output tensors back to the
+// host.
 //
 // Returns 1 on SUCCESS, 0 on FAILURE -- note this is the OPPOSITE
 // convention from every other function in this package (which return
 // a handle/count where 0 means failure): this mirrors TensorRT's own
-// `executeV2`, which returns a bool rather than a status code. There
+// enqueueV3, which returns a bool rather than a status code. There
 // is no separate error code on failure; check stderr.
-extern "C" fn trt_execute(context: i64, bindings: ref Vec<i64>, n_bindings: i32) -> i32;
+extern "C" fn trt_enqueue(context: i64, stream: i64) -> i32;

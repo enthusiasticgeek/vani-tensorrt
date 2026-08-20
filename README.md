@@ -3,8 +3,8 @@
 Host-side TensorRT inference bindings for the
 [vāṇी compiler](https://github.com/enthusiasticgeek/vani-compiler), via
 `extern "C"` FFI to a hand-written C++ shim. Load a pre-built TensorRT
-engine, inspect its input/output bindings, and run inference from vāṇी
-source.
+engine, inspect its input/output tensors by name, and run inference
+from vāṇी source.
 
 DLA (NVIDIA's Deep Learning Accelerator, found on Jetson/Orin
 hardware) is not a separate binding surface here -- it's a TensorRT
@@ -12,7 +12,34 @@ execution-provider config flag set at engine-BUILD time (outside this
 package's scope, see "Scope" below), not something this runtime-only
 package needs to expose separately.
 
-## Hardware AND API-version verification status — read this first
+## Target generation, no backward compatibility
+
+This package targets **TensorRT 10+ (2026-era), full stop** -- there
+is no attempt to support older TensorRT releases or compatibility
+shims for legacy behavior. Concretely, it binds TensorRT's current
+**tensor-name-based execution API**
+(`getNbIOTensors`/`getIOTensorName`/`getTensorIOMode`/
+`getTensorShape`/`setTensorAddress`/`enqueueV3`) exclusively.
+TensorRT's OLDER positional-index "bindings" API
+(`getNbBindings`/`bindingIsInput`/`executeV2`) is deprecated as of
+TensorRT 8.5 and **removed entirely in TensorRT 10** -- this package
+never binds it, in either direction. **If you're on a TensorRT release
+older than 10, this package will not link against it as written, and
+no porting effort is planned for that direction** -- the tensor-name
+API is genuinely more capable (named, order-independent I/O access;
+async-by-default execution via an explicit stream) and is where
+TensorRT itself is headed, so that's the only surface bound here.
+
+**Older GPUs may or may not work.** Nothing here deliberately excludes
+older hardware -- TensorRT 10 itself still supports a wide range of
+NVIDIA compute capabilities -- but nothing was written to specifically
+verify or support it either. If your GPU or driver predates what your
+TensorRT 10 install expects, you'll hit whatever error TensorRT itself
+raises through the logger (wired to stderr with a `[vani-tensorrt]`
+prefix), not a friendly message from this package. There is no
+compatibility layer and none is planned.
+
+## Hardware AND SDK-availability verification status — read this first
 
 This package carries **two** layers of unverified risk, more than
 [`vani-cuda`](https://github.com/enthusiasticgeek/vani-cuda) or
@@ -26,17 +53,8 @@ This package carries **two** layers of unverified risk, more than
    **TensorRT is not distributed through any standard Linux
    distribution's package manager** -- it requires an NVIDIA Developer
    Program account and a direct download/EULA acceptance. There was no
-   way to even attempt installing headers to compile-check this shim.
-3. **TensorRT's own API has real version churn**, more than CUDA's or
-   HIP's Runtime APIs (both deliberately, famously stable across
-   versions). This shim targets the classic bindings-based Execution
-   API (`getNbBindings`/`getBindingIndex`/`bindingIsInput`/
-   `getBindingDimensions`/`executeV2`), stable from roughly TensorRT 7
-   through 8.x. **TensorRT 10.x deprecated/removed several of these
-   entry points** in favor of a newer tensor-NAME-based API
-   (`getNbIOTensors`/`getIOTensorName`/`setTensorAddress`/
-   `enqueueV3`). If you're on TensorRT 10+, this shim will likely need
-   porting to that newer API before it works at all.
+   way to even attempt installing headers to compile-check this shim
+   against real ones.
 
 What *has* been verified directly, without guessing:
 
@@ -56,9 +74,9 @@ What *has* been verified directly, without guessing:
   changes were needed for this. The shim itself reaches the compiler
   and fails only on the absent `NvInfer.h` header.
 
-If you have a real TensorRT installation (any version) and can spare
-some time: please try building against it, and file an issue with
-whichever version you tested and what broke, if anything.
+If you have a real TensorRT 10+ installation and can spare some time:
+please try building against it, and file an issue with whichever
+version you tested and what broke, if anything.
 
 ## Add to your project
 
@@ -77,28 +95,38 @@ vanic add tensorrt
 | Category | Functions |
 |---|---|
 | Runtime | `trt_create_runtime`, `trt_destroy_runtime` |
-| Engine | `trt_load_engine_from_file`, `trt_destroy_engine`, `trt_get_nb_bindings`, `trt_get_binding_index`, `trt_binding_is_input`, `trt_get_binding_num_elements` |
-| Execution context | `trt_create_execution_context`, `trt_destroy_execution_context` |
-| Inference | `trt_execute` |
+| Engine | `trt_load_engine_from_file`, `trt_destroy_engine`, `trt_get_nb_io_tensors`, `trt_get_io_tensor_name`, `trt_tensor_is_input`, `trt_get_tensor_num_elements` |
+| Execution context | `trt_create_execution_context`, `trt_destroy_execution_context`, `trt_set_tensor_address` |
+| Stream | `trt_create_stream`, `trt_destroy_stream`, `trt_stream_synchronize` |
+| Inference | `trt_enqueue` |
 
-**11 functions** -- deliberately far fewer than vani-cuda's/vani-rocm's
-30, because this package's scope is narrower (see "Scope" below) and
+**15 functions** -- still fewer than vani-cuda's/vani-rocm's 30+,
+because this package's scope is narrower (see "Scope" below) and
 because TensorRT's own error-reporting shape (a logger callback, not a
 per-call error code) means there's no `trt_error_string`/`trt_check`
-equivalent to add -- see the note on `trt_execute`'s inverted return
+equivalent to add -- see the note on `trt_enqueue`'s inverted return
 convention below.
 
-Every device pointer, and every runtime/engine/context handle, crosses
-the vāṇी boundary as an opaque `i64` -- same convention as vani-cuda/
-vani-rocm.
+Every device pointer, and every runtime/engine/context/stream handle,
+crosses the vāṇी boundary as an opaque `i64` -- same convention as
+vani-cuda/vani-rocm. Tensors are identified by **name** (`Str`), not
+by a positional index -- the modern API's own convention; discover
+names via `trt_get_io_tensor_name` before doing anything else with a
+given tensor.
 
-**`trt_execute` returns the OPPOSITE convention from every other
-function here**: 1 = success, 0 = failure (mirroring TensorRT's own
-`executeV2`, which returns a `bool`). Every other function returns a
-handle or count where 0 means "failed to produce one." There's no
-separate error code on any failure path -- TensorRT reports problems
-through a logger callback, which this package wires to stderr with a
-`[vani-tensorrt]` prefix.
+**`trt_enqueue`/`trt_set_tensor_address` return the OPPOSITE
+convention from every other function here**: 1 = success, 0 = failure
+(mirroring TensorRT's own `enqueueV3`/`setTensorAddress`, which return
+a `bool`). Every other function returns a handle or count where 0
+means "failed to produce one." There's no separate error code on any
+failure path -- TensorRT reports problems through a logger callback,
+which this package wires to stderr with a `[vani-tensorrt]` prefix.
+
+**Execution is asynchronous by design** -- unlike the older, removed
+`executeV2`, `enqueueV3` requires an explicit CUDA stream and returns
+immediately. Bind every I/O tensor's address (`trt_set_tensor_address`,
+both inputs AND outputs need one), call `trt_enqueue`, then
+`trt_stream_synchronize` before reading outputs back to the host.
 
 ## Why the shim is C++, not C (unlike vani-cuda/vani-rocm)
 
@@ -108,14 +136,14 @@ throughout -- `IRuntime`, `ICudaEngine`, `IExecutionContext`,
 at all. There is no way to write this shim in plain C the way
 vani-cuda's and vani-rocm's Runtime-API shims could. This DOES work
 through vāṇी's existing `--link-with` pipeline with no compiler
-changes -- see "Hardware AND API-version verification status" above
-for the confirmation -- you just need one extra flag
-(`-lstdc++`) that a plain-C shim never needed.
+changes -- see the verification section above for the confirmation --
+you just need one extra flag (`-lstdc++`) that a plain-C shim never
+needed.
 
 ## Building and testing
 
 ```sh
-# Build your vāṇī program, linking the C++ shim (compiled by vāṇी's
+# Build your vāṇी program, linking the C++ shim (compiled by vāṇी's
 # own $CC, auto-detected as C++ from the .cpp extension) AND the
 # TensorRT + CUDA runtime libraries AND the C++ standard library.
 vanic build your_program.vani \
@@ -172,9 +200,10 @@ per-inference. Composing directly with vani-cuda for device memory
 something that allocates/copies CUDA device memory in practice) is
 covered above.
 
-Also out of scope: dynamic input shapes (bindings with a `-1`
-dimension aren't supported by `trt_get_binding_num_elements`, which
-returns `-1` for them rather than a usable size), multi-GPU
+Also out of scope: dynamic input shapes (tensors with a `-1` dimension
+aren't supported by `trt_get_tensor_num_elements`, which returns `-1`
+for them rather than a usable size -- setting a concrete shape at
+execution time via `setInputShape` isn't bound), multi-GPU
 orchestration, and INT8 calibration.
 
 ## Related packages

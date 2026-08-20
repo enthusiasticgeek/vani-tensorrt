@@ -2,62 +2,44 @@
 // TensorRT's C++-object-shaped inference API (builder/network/
 // engine/execution-context lifecycle, all abstract classes with
 // virtual methods) into a flat, opaque-handle, plain-C-ABI surface
-// vāṇी's FFI boundary can call -- the SAME goal as vani-cuda's and
-// vani-rocm's shims, but a genuinely different SHAPE of problem:
-// CUDA/HIP's Runtime APIs are already flat C functions (a thin
-// pointer-width-and-error-code translation was enough); TensorRT's
-// API has no C entry points at all, so this shim is where the actual
-// object lifecycle management happens, not just a type-width cast.
+// vāṇী's FFI boundary can call.
 //
-// *** MUST be compiled as C++ (unlike vani-cuda/vani-rocm's shims,
-// which are deliberately plain C) -- TensorRT's headers use classes,
-// namespaces, and virtual dispatch throughout; there is no way to
-// avoid this the way dim3-via-aggregate-init let the other two
-// packages stay C. Confirmed to work through vāṇी's EXISTING
-// `--link-with` pipeline with no compiler changes needed: gcc/clang
-// auto-select the C++ front end from the `.cpp` extension, and
-// `-lstdc++` (an ordinary `-l<name>` flag vāṇी already supports)
-// supplies the missing C++ runtime symbols (operator new/delete,
-// RTTI, exception personality routine) at link time. See
-// README.md's "Building and testing" section for the exact command.
+// *** TARGETS THE CURRENT (2026-era) TENSOR-NAME-BASED EXECUTION
+// API ONLY -- getNbIOTensors/getIOTensorName/getTensorIOMode/
+// getTensorShape/setTensorAddress/enqueueV3. This is a deliberate
+// choice, made explicitly WITHOUT backward compatibility: TensorRT's
+// older bindings-based API (getNbBindings/bindingIsInput/executeV2)
+// is deprecated as of TensorRT 8.5 and REMOVED in TensorRT 10 --
+// there is no attempt here to support both generations or run on an
+// installation older than roughly TensorRT 10. If you're on an
+// older TensorRT release, this package will not link/work as written
+// -- there is no compatibility shim and none is planned. See
+// README.md's "Target generation, no backward compatibility" section.
 //
-// *** API-VERSION RISK, distinct from (and larger than) the
-// "untested on hardware" caveat every hardware-acceleration-tier
-// package carries: this shim targets TensorRT's classic bindings-
-// based Execution API (`getNbBindings`/`getBindingIndex`/
-// `bindingIsInput`/`getBindingDimensions`/`executeV2`), stable from
-// roughly TensorRT 7 through 8.x, and the `delete`-based object
-// destruction convention TensorRT 8.0+ uses (replacing the older
-// `->destroy()` method TensorRT < 8.0 used). TensorRT 10.x
-// deprecated/removed several of these bindings-based entry points in
-// favor of a newer tensor-NAME-based API (`getNbIOTensors`/
-// `getIOTensorName`/`setTensorAddress`/`enqueueV3`). If you're on
-// TensorRT 10+, this shim may need porting to that newer API --
-// unlike CUDA's/HIP's Runtime APIs (deliberately, famously stable
-// across versions), TensorRT's public API has had more churn between
-// major versions historically. Written from TensorRT's documented
+// *** MUST be compiled as C++ -- TensorRT's headers use classes,
+// namespaces, and virtual dispatch throughout, with no C-callable
+// subset. Confirmed to work through vāṇी's EXISTING `--link-with`
+// pipeline with no compiler changes needed: gcc/clang auto-select
+// the C++ front end from the `.cpp` extension, and `-lstdc++` (an
+// ordinary `-l<name>` flag vāṇी already supports) supplies the
+// missing C++ runtime symbols. See README.md's "Building and
+// testing" section for the exact command.
+//
+// *** SCOPE: inference only, from an already-built engine file. See
+// README.md's "Scope" section for why engine BUILDING (Builder +
+// NetworkDefinition + BuilderConfig + ONNX parser) is out of scope --
+// `trtexec` (TensorRT's own bundled CLI) already covers that well as
+// a one-time offline step.
+//
+// *** HARDWARE STATUS: written from TensorRT's documented current
 // API contract; NOT compiled or run against any actual TensorRT
 // installation (no TensorRT SDK is available via this development
-// environment's package manager at all -- unlike the CUDA/HIP
-// toolkits, TensorRT is NVIDIA-account-gated, not distributed through
-// standard Linux distro repositories). See README.md's "Hardware AND
-// API-version verification status" section before relying on this.
-//
-// *** SCOPE: inference only. Engine BUILDING (the Builder +
-// NetworkDefinition + BuilderConfig + ONNX-parser pipeline, itself a
-// large, version-sensitive C++ API surface) is deliberately out of
-// scope for v0.1.0 -- the standard, NVIDIA-recommended workflow is to
-// build a serialized `.engine`/`.plan` file OFFLINE via `trtexec`
-// (TensorRT's own command-line tool, ships with the SDK) from an
-// ONNX model, then load that already-built engine at runtime, which
-// is exactly what this shim's `trt_load_engine_from_file` does. This
-// mirrors vani-algebra's own precedent for a deliberate, documented
-// scope-narrowing decision (dropping a hand-derived quartic closed
-// form) rather than reaching for a much larger, riskier surface to
-// hit a "complete" feeling that isn't actually load-bearing for this
-// package's stated purpose.
+// environment's package manager -- unlike CUDA/HIP, TensorRT is
+// NVIDIA-account-gated, not distributed through standard Linux distro
+// repositories). See README.md's "Hardware verification status".
 
 #include <NvInfer.h>
+#include <cuda_runtime.h>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -144,28 +126,33 @@ int32_t trt_destroy_engine(int64_t engine) {
   return 0;
 }
 
-// Number of bindings (inputs + outputs combined) the engine exposes.
-int32_t trt_get_nb_bindings(int64_t engine) {
-  return ((ICudaEngine *)(intptr_t)engine)->getNbBindings();
+// Number of I/O tensors (inputs + outputs combined) the engine
+// exposes -- the modern name-based replacement for the old
+// getNbBindings().
+int32_t trt_get_nb_io_tensors(int64_t engine) {
+  return ((ICudaEngine *)(intptr_t)engine)->getNbIOTensors();
 }
 
-// -1 if no binding with this name exists.
-int32_t trt_get_binding_index(int64_t engine, const char *name) {
-  return ((ICudaEngine *)(intptr_t)engine)->getBindingIndex(name);
+// The name of the I/O tensor at position `index` (0..nb_io_tensors).
+// Every other function below identifies a tensor by this NAME, not a
+// position -- discover names by iterating this function first.
+const char *trt_get_io_tensor_name(int64_t engine, int32_t index) {
+  return ((ICudaEngine *)(intptr_t)engine)->getIOTensorName(index);
 }
 
-// 1 if the binding at `index` is an input, 0 if it's an output.
-int32_t trt_binding_is_input(int64_t engine, int32_t index) {
-  return ((ICudaEngine *)(intptr_t)engine)->bindingIsInput(index) ? 1 : 0;
+// 1 if the named tensor is an input, 0 if it's an output.
+int32_t trt_tensor_is_input(int64_t engine, const char *name) {
+  TensorIOMode mode = ((ICudaEngine *)(intptr_t)engine)->getTensorIOMode(name);
+  return (mode == TensorIOMode::kINPUT) ? 1 : 0;
 }
 
-// Total element count for the binding at `index` (product of every
+// Total element count for the named tensor (product of every
 // dimension). Returns -1 if any dimension is dynamic (-1 in
-// TensorRT's own Dims representation) -- a dynamic-shape engine needs
+// TensorRT's own Dims representation) -- a dynamic-shape tensor needs
 // the caller to set the concrete shape at execution time via a
 // binding-shape call this v0.1.0 doesn't yet expose (see TODO.md).
-int64_t trt_get_binding_num_elements(int64_t engine, int32_t index) {
-  Dims dims = ((ICudaEngine *)(intptr_t)engine)->getBindingDimensions(index);
+int64_t trt_get_tensor_num_elements(int64_t engine, const char *name) {
+  Dims dims = ((ICudaEngine *)(intptr_t)engine)->getTensorShape(name);
   int64_t total = 1;
   for (int32_t i = 0; i < dims.nbDims; i++) {
     if (dims.d[i] < 0) {
@@ -188,27 +175,66 @@ int32_t trt_destroy_execution_context(int64_t context) {
   return 0;
 }
 
-// Runs synchronous inference. `bindings` is a HOST-side array of
-// DEVICE pointers (as i64 handles -- allocate them with vani-cuda's
-// cuda_malloc, one per binding index, in binding-index order; upload
-// input data with cuda_memcpy_h2d_* before calling this, download
-// output data with cuda_memcpy_d2h_* after), `n_bindings` must equal
-// trt_get_nb_bindings(engine).
-//
-// Returns 1 on success, 0 on failure -- NOTE the inverted convention
-// relative to every other function in this package (which return an
-// i32 handle/count, 0 meaning "failed to produce a handle"): this one
-// mirrors TensorRT's own executeV2, which returns a bool, not an
-// error/status code. There is no separate error code to inspect on
-// failure; check the logger's stderr output.
-int32_t trt_execute(int64_t context, const int64_t *bindings, int32_t n_bindings) {
-  // A Vec<i64> of device-pointer-sized handles is already laid out
-  // exactly like a `void* const*` array on any 64-bit platform (both
-  // are contiguous pointer-width values) -- no per-element
-  // conversion needed, just a reinterpret of the array itself.
-  (void)n_bindings; // only used for documentation/precondition clarity
+// Binds a device pointer (as an i64 handle -- allocate it with
+// vani-cuda's cuda_malloc or cuda_malloc_async, and for input
+// tensors, populate it with input data before calling trt_enqueue)
+// to the named tensor. Call this once per I/O tensor (both inputs
+// AND outputs need an address set) before every trt_enqueue call
+// whose bindings changed. Returns 1 on success, 0 on failure (name
+// not found, or the pointer's implied size doesn't match the
+// tensor's expected size -- check stderr).
+int32_t trt_set_tensor_address(int64_t context, const char *name, int64_t device_ptr) {
   bool ok = ((IExecutionContext *)(intptr_t)context)
-                ->executeV2((void *const *)(const void *)bindings);
+                ->setTensorAddress(name, (void *)(intptr_t)device_ptr);
+  return ok ? 1 : 0;
+}
+
+// ---- Stream --------------------------------------------------------------
+//
+// enqueueV3 (below) requires an explicit CUDA stream -- unlike the
+// old executeV2, there's no implicit "just run synchronously on the
+// default stream" mode. These three functions wrap the CUDA stream
+// calls directly in this shim (rather than requiring vani-cuda as a
+// hard dependency) so this package is usable stand-alone for the
+// common case; if you're already using vani-cuda for memory
+// management, its own cuda_stream_create/synchronize/destroy work
+// identically (both wrap the exact same CUDA Runtime API calls) --
+// use whichever is already in scope.
+
+int64_t trt_create_stream(void) {
+  cudaStream_t s;
+  cudaError_t err = cudaStreamCreate(&s);
+  if (err != cudaSuccess) {
+    std::fprintf(stderr, "[vani-tensorrt] cudaStreamCreate failed: %s\n", cudaGetErrorString(err));
+    return 0;
+  }
+  return (int64_t)(intptr_t)s;
+}
+
+int32_t trt_destroy_stream(int64_t stream) {
+  return (int32_t)cudaStreamDestroy((cudaStream_t)(intptr_t)stream);
+}
+
+int32_t trt_stream_synchronize(int64_t stream) {
+  return (int32_t)cudaStreamSynchronize((cudaStream_t)(intptr_t)stream);
+}
+
+// ---- Inference -------------------------------------------------------
+
+// Enqueues inference asynchronously on `stream` (from trt_create_stream,
+// or an equivalent vani-cuda cuda_stream_create handle). Every I/O
+// tensor must already have its address set via trt_set_tensor_address
+// before this call. Returns immediately -- call trt_stream_synchronize
+// (or vani-cuda's cuda_stream_synchronize) before reading output
+// tensors back to the host.
+//
+// Returns 1 on SUCCESS, 0 on FAILURE -- note this is the OPPOSITE
+// convention from every other function in this package (which return
+// a handle/count where 0 means failure): this mirrors TensorRT's own
+// enqueueV3, which returns a bool rather than a status code. There is
+// no separate error code on failure; check stderr.
+int32_t trt_enqueue(int64_t context, int64_t stream) {
+  bool ok = ((IExecutionContext *)(intptr_t)context)->enqueueV3((cudaStream_t)(intptr_t)stream);
   return ok ? 1 : 0;
 }
 

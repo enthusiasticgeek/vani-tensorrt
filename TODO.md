@@ -4,10 +4,13 @@
 > 2026-08-17, implementation started 2026-08-20 (same day as
 > [`vani-cuda`](https://github.com/enthusiasticgeek/vani-cuda) and
 > [`vani-rocm`](https://github.com/enthusiasticgeek/vani-rocm)). The
-> roadmap flagged this as the highest-risk repo of the three -- READ
-> README.md's "Hardware AND API-version verification status" before
-> relying on anything here; the risk profile is genuinely larger than
-> vani-cuda/vani-rocm's, not just the same caveat repeated.
+> roadmap flagged this as the highest-risk repo of the three. Rewritten
+> 2026-08-20 to target TensorRT 10+'s current tensor-name API
+> exclusively, no backward compatibility -- READ README.md's "Target
+> generation, no backward compatibility" and "Hardware AND
+> SDK-availability verification status" before relying on anything
+> here; the risk profile is genuinely larger than vani-cuda/vani-rocm's,
+> not just the same caveat repeated.
 
 ---
 
@@ -20,18 +23,32 @@
 - [x] `trt_load_engine_from_file` — loads a pre-built `.engine` file
       (see README's "Getting an engine file")
 - [x] `trt_destroy_engine`
-- [x] `trt_get_nb_bindings`, `trt_get_binding_index`,
-      `trt_binding_is_input`, `trt_get_binding_num_elements`
+- [x] `trt_get_nb_io_tensors`, `trt_get_io_tensor_name`,
+      `trt_tensor_is_input`, `trt_get_tensor_num_elements` —
+      tensor-NAME-based, replacing the older positional-index
+      "bindings" API this package no longer binds at all
 
-### Execution context (2 functions)
+### Execution context (3 functions)
 - [x] `trt_create_execution_context`, `trt_destroy_execution_context`
+- [x] `trt_set_tensor_address` — binds a device pointer to a named
+      tensor; call once per I/O tensor before `trt_enqueue`
+
+### Stream (3 functions)
+- [x] `trt_create_stream`, `trt_destroy_stream`, `trt_stream_synchronize`
+      — `enqueueV3` requires an explicit stream (unlike the older,
+      removed `executeV2`, there's no implicit synchronous mode);
+      these wrap the CUDA stream calls directly in this shim so the
+      package is usable stand-alone without a hard vani-cuda dependency
 
 ### Inference (1 function)
-- [x] `trt_execute` — synchronous, via `executeV2`; note its inverted
+- [x] `trt_enqueue` — asynchronous, via `enqueueV3`; note its inverted
       1=success/0=failure return convention (README explains why)
 
-**Total: 11 vāṇी-facing functions** — deliberately narrower than
-vani-cuda/vani-rocm's 30, per the scope decision below.
+**Total: 15 vāṇी-facing functions** — still narrower than
+vani-cuda/vani-rocm's 32, per the scope decision below (up from an
+earlier 11-function bindings-based design, before the 2026-08-20
+rewrite to the current tensor-name API added the stream-management
+trio and `trt_set_tensor_address`).
 
 ### Validation performed
 - [x] Every declaration in `src/lib.vani` passes `vanic check`
@@ -45,25 +62,20 @@ vani-cuda/vani-rocm's 30, per the scope decision below.
       synthetic C++-features probe test described in README) and
       fails only on the absent `NvInfer.h` header
 
-### NOT validated (needs real hardware + a real TensorRT SDK)
+### NOT validated (needs real hardware + a real TensorRT 10+ SDK)
 - [ ] Any actual TensorRT call whatsoever -- unlike vani-cuda/
       vani-rocm, this shim was never compile-checked against real
       vendor headers at all (TensorRT isn't apt-installable the way
       the CUDA/HIP toolkits were; it requires an NVIDIA Developer
       account)
-- [ ] Whether the targeted API generation (bindings-based
-      `executeV2`, `delete`-based object destruction) actually matches
-      whatever TensorRT version a real user has -- see README's
-      "API-version churn" note. **This is the single biggest open
-      question for this package** -- more likely to need a real fix
-      than vani-cuda's/vani-rocm's hardware-verification gaps, which
-      are "probably fine, needs a hardware run to confirm" rather than
-      "may need actual porting work"
+- [ ] Whether `getNbIOTensors`/`getIOTensorName`/`getTensorIOMode`/
+      `getTensorShape`/`setTensorAddress`/`enqueueV3`'s exact
+      signatures match a real TensorRT 10+ install byte-for-byte --
+      written from documented API contract, never compiled against a
+      real header
 - [ ] Numerical correctness of any inference run
 - [ ] Whether `deserializeCudaEngine`'s 2-argument (no plugin-factory)
-      overload assumed here is actually what the target TensorRT
-      version expects (older TensorRT had a 3-argument overload with a
-      plugin-factory parameter, removed in newer versions)
+      overload assumed here is actually what TensorRT 10+ expects
 
 ## Compiler-side finding along the way
 
@@ -84,11 +96,15 @@ extensions.
   full reasoning (mirrors vani-algebra's own precedent for a
   documented, deliberate scope-narrowing decision rather than reaching
   for a larger, riskier surface).
-- **Classic bindings-based API, not the newer tensor-name API.** A
-  real, acknowledged bet on which TensorRT generation this targets --
-  see README/shim comments. Chosen for being the longer-lived, more
-  widely-documented, higher-training-confidence surface, not because
-  it's necessarily what a specific user has installed.
+- **Tensor-name API only, no backward compatibility.** Rewritten
+  2026-08-20 from an initial design that deliberately targeted the
+  OLDER bindings-based API (`getNbBindings`/`executeV2`) as a version-
+  risk hedge. Per explicit direction to design without backward
+  compatibility and assume 2026+ SDKs, that hedge was removed --
+  this now binds ONLY `getNbIOTensors`/`getIOTensorName`/
+  `getTensorIOMode`/`getTensorShape`/`setTensorAddress`/`enqueueV3`,
+  the API generation TensorRT 10+ ships, with no attempt to also
+  support the older, now-removed bindings API.
 - **No `trt_check`/`trt_error_string` convenience wrapper**, unlike
   vani-cuda's `cuda_check`/vani-rocm's `hip_check`. TensorRT has no
   per-call error CODE to translate -- errors surface through the
@@ -96,13 +112,8 @@ extensions.
 
 ## Future work (not started, no estimate)
 
-- [ ] Port to the tensor-name-based API (`setTensorAddress`/
-      `enqueueV3`/`getNbIOTensors`) if TensorRT 10+ compatibility
-      turns out to be needed -- likely a real, nontrivial follow-up,
-      not a small tweak, given how different the two APIs' calling
-      conventions are
-- [ ] Dynamic input shapes (`setBindingDimensions` at execution time)
-- [ ] Async execution (`enqueueV2`/`enqueueV3` + streams), if a real
-      workload needs overlap between transfer and inference
+- [ ] Dynamic input shapes (`setInputShape` at execution time)
 - [ ] Engine building from ONNX, if `trtexec`-as-an-offline-step turns
       out to be a real friction point for actual users
+- [ ] Multiple named profiles / optimization profile selection, if a
+      real workload needs it
