@@ -219,6 +219,44 @@ int32_t trt_stream_synchronize(int64_t stream) {
   return (int32_t)cudaStreamSynchronize((cudaStream_t)(intptr_t)stream);
 }
 
+// ---- Memory (device-buffer helpers, f32 only) --------------------------
+//
+// TensorRT tensors are overwhelmingly f32 (float) -- not the i64/f64
+// vani-cuda's own memcpy helpers originally shipped with. Added
+// 2026-08-20, alongside the matching addition to vani-cuda/vani-rocm,
+// specifically so a numerically meaningful vani-tensorrt example can
+// be written WITHOUT requiring vani-cuda as a hard dependency (this
+// package already duplicates stream management above for the same
+// "usable stand-alone" reason). Only f32 is provided here -- i64/f64
+// device buffers are a vani-cuda/vani-rocm concern, not a TensorRT-
+// tensor concern; if you're already pulling in vani-cuda for other
+// reasons, its cuda_malloc/cuda_memcpy_h2d_f32/etc. work identically
+// (same underlying cudaMemcpy call) and there's no need for both.
+//
+// `cuda_malloc`-equivalent allocation for these buffers: use
+// vani-cuda's `cuda_malloc`, or note that `cuda_malloc`/`cuda_memset`
+// are byte-count based and dtype-agnostic, so any raw device
+// allocation works as the destination/source here regardless of
+// which package allocated it.
+
+int32_t trt_memcpy_h2d_f32(int64_t dst_device, const float *src_host, int64_t n_elements) {
+  return (int32_t)cudaMemcpy((void *)(intptr_t)dst_device, src_host,
+                              (size_t)n_elements * sizeof(float),
+                              cudaMemcpyHostToDevice);
+}
+
+int32_t trt_memcpy_d2h_f32(float *dst_host, int64_t src_device, int64_t n_elements) {
+  return (int32_t)cudaMemcpy(dst_host, (const void *)(intptr_t)src_device,
+                              (size_t)n_elements * sizeof(float),
+                              cudaMemcpyDeviceToHost);
+}
+
+int32_t trt_memcpy_d2d_f32(int64_t dst_device, int64_t src_device, int64_t n_elements) {
+  return (int32_t)cudaMemcpy((void *)(intptr_t)dst_device, (const void *)(intptr_t)src_device,
+                              (size_t)n_elements * sizeof(float),
+                              cudaMemcpyDeviceToDevice);
+}
+
 // ---- Inference -------------------------------------------------------
 
 // Enqueues inference asynchronously on `stream` (from trt_create_stream,

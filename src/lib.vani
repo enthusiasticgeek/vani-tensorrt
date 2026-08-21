@@ -98,6 +98,19 @@ extern "C" fn trt_create_stream() -> i64;
 extern "C" fn trt_destroy_stream(stream: i64) -> i32;
 extern "C" fn trt_stream_synchronize(stream: i64) -> i32;
 
+// ---- Memory (device-buffer helpers, f32 only) --------------------------
+//
+// TensorRT tensors are overwhelmingly f32 (float). These wrap
+// cudaMemcpy directly in this package's own shim -- like
+// trt_create_stream above, so this package stays usable stand-alone
+// without a hard vani-cuda dependency. If you're already pulling in
+// vani-cuda for other reasons, its own
+// cuda_memcpy_h2d_f32/cuda_memcpy_d2h_f32/cuda_memcpy_d2d_f32 work
+// identically (same underlying CUDA call); no need for both.
+extern "C" fn trt_memcpy_h2d_f32(dst_device: i64, src_host: ref Vec<f32>, n_elements: i64) -> i32;
+extern "C" fn trt_memcpy_d2h_f32(dst_host: mut ref Vec<f32>, src_device: i64, n_elements: i64) -> i32;
+extern "C" fn trt_memcpy_d2d_f32(dst_device: i64, src_device: i64, n_elements: i64) -> i32;
+
 // ---- Inference -------------------------------------------------------
 
 // Enqueues inference asynchronously on `stream`. Every I/O tensor

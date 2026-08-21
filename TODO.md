@@ -40,15 +40,26 @@
       these wrap the CUDA stream calls directly in this shim so the
       package is usable stand-alone without a hard vani-cuda dependency
 
+### Memory (3 functions)
+- [x] `trt_memcpy_h2d_f32`, `trt_memcpy_d2h_f32`, `trt_memcpy_d2d_f32`
+      — added 2026-08-20, mirroring vani-cuda's/vani-rocm's same-day
+      `f32` additions. `f32`-only, deliberately: TensorRT tensors are
+      overwhelmingly `f32`, and duplicated directly here (same reason
+      as the stream trio above) so the package stays usable
+      stand-alone. Device buffer allocation (`cuda_malloc`) is NOT
+      duplicated -- it's byte-count-based and dtype-agnostic already,
+      nothing TensorRT-specific to add there
+
 ### Inference (1 function)
 - [x] `trt_enqueue` — asynchronous, via `enqueueV3`; note its inverted
       1=success/0=failure return convention (README explains why)
 
-**Total: 15 vāṇी-facing functions** — still narrower than
-vani-cuda/vani-rocm's 32, per the scope decision below (up from an
+**Total: 18 vāṇी-facing functions** — still narrower than
+vani-cuda/vani-rocm's 36, per the scope decision below (up from an
 earlier 11-function bindings-based design, before the 2026-08-20
 rewrite to the current tensor-name API added the stream-management
-trio and `trt_set_tensor_address`).
+trio and `trt_set_tensor_address`, and the same-day `f32` memcpy
+addition brought it to 18).
 
 ### Validation performed
 - [x] Every declaration in `src/lib.vani` passes `vanic check`

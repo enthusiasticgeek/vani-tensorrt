@@ -98,9 +98,19 @@ vanic add tensorrt
 | Engine | `trt_load_engine_from_file`, `trt_destroy_engine`, `trt_get_nb_io_tensors`, `trt_get_io_tensor_name`, `trt_tensor_is_input`, `trt_get_tensor_num_elements` |
 | Execution context | `trt_create_execution_context`, `trt_destroy_execution_context`, `trt_set_tensor_address` |
 | Stream | `trt_create_stream`, `trt_destroy_stream`, `trt_stream_synchronize` |
+| Memory | `trt_memcpy_h2d_f32`, `trt_memcpy_d2h_f32`, `trt_memcpy_d2d_f32` |
 | Inference | `trt_enqueue` |
 
-**15 functions** -- still fewer than vani-cuda's/vani-rocm's 30+,
+The memory functions are `f32`-only, deliberately -- TensorRT tensors
+are overwhelmingly `f32`, and (like `trt_create_stream` above) these
+are duplicated directly in this package's own shim rather than
+requiring `vani-cuda` as a hard dependency, so the package stays
+usable stand-alone for the common case. Device buffer *allocation*
+(`cuda_malloc`) isn't duplicated -- it's byte-count-based and
+dtype-agnostic already, so there's nothing TensorRT-specific to add;
+pull in `vani-cuda` for that.
+
+**18 functions** -- still fewer than vani-cuda's/vani-rocm's 36,
 because this package's scope is narrower (see "Scope" below) and
 because TensorRT's own error-reporting shape (a logger callback, not a
 per-call error code) means there's no `trt_error_string`/`trt_check`

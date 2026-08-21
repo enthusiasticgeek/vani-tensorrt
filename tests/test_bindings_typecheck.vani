@@ -47,6 +47,16 @@ fn main() -> i64 {
   let stream: i64 = trt_create_stream();
   print "trt_create_stream handle:", stream;
 
+  // f32 memcpy round trip, standalone (no vani-cuda dependency).
+  let f32a: f32 = 1.5;
+  let f32b: f32 = 2.5;
+  let host_in_f32: Vec<f32> = vec(f32a, f32b);
+  let rc_h2d: i32 = trt_memcpy_h2d_f32(device_ptr, ref host_in_f32, 2);
+  let f32z: f32 = 0.0;
+  let host_out_f32: Vec<f32> = vec(f32z, f32z);
+  let rc_d2h: i32 = trt_memcpy_d2h_f32(mut ref host_out_f32, device_ptr, 2);
+  print "trt_memcpy_h2d_f32/d2h_f32 rcs:", rc_h2d, rc_d2h;
+
   let ok: i32 = trt_enqueue(context, stream);
   print "trt_enqueue (1=success, 0=failure):", ok;
 
